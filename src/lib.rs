@@ -1,15 +1,17 @@
 /// valley-free is a library that builds AS-level topology using CAIDA's
 /// AS-relationship data file and run path exploration using valley-free routing
 /// principle.
-use std::{
-    collections::{HashMap, HashSet},
-    io::BufRead,
-};
+use std::io::BufRead;
+use ahash::{RandomState, HashMap, HashSet};
 use std::{fs::File, io::BufReader};
 
 use bzip2::read::BzDecoder;
+use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::{exceptions::PyIOError, wrap_pyfunction};
+
+
+pub static RANDOM_STATE: Lazy<RandomState> = Lazy::new(|| { RandomState::with_seeds(42, 4, 1, 4) });
 
 /// AS relationship types: CUSTOMER, PROVIDER, and PEER
 pub enum RelType {
@@ -33,7 +35,7 @@ pub type Path = Vec<u32>;
 
 /// Definiton of AS struct
 #[pyclass]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct As {
     /// Autonomous system number
     #[pyo3(get, set)]
@@ -71,7 +73,7 @@ impl As {
 
 /// Definition of Topology
 #[pyclass]
-#[derive(FromPyObject)]
+#[derive(FromPyObject, Debug)]
 pub struct Topology {
     /// Hashmap of ASes: ASN (u32) to [As]
     #[pyo3(get)]
@@ -82,7 +84,7 @@ impl Topology {
     /// Constructor of the Topology struct
     pub fn new() -> Topology {
         Topology {
-            ases_map: HashMap::new(),
+            ases_map: HashMap::with_hasher(RANDOM_STATE.clone()),
         }
     }
 
@@ -91,9 +93,9 @@ impl Topology {
             std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
             std::collections::hash_map::Entry::Vacant(v) => v.insert(As {
                 asn: asn,
-                customers: HashSet::new(),
-                providers: HashSet::new(),
-                peers: HashSet::new(),
+                customers: HashSet::with_hasher(RANDOM_STATE.clone()),
+                providers: HashSet::with_hasher(RANDOM_STATE.clone()),
+                peers: HashSet::with_hasher(RANDOM_STATE.clone()),
             }),
         }
         .asn
@@ -193,7 +195,7 @@ impl Topology {
     /// let res = topo.build_topology(reader);
     ///
     /// let mut all_paths = vec![];
-    /// let mut seen = HashSet::new();
+    /// let mut seen = HashSet::with_hasher(RANDOM_STATE.clone());
     /// topo.propagate_paths(&mut all_paths, 15169, Direction::UP, vec![], &mut seen);
     /// dbg!(all_paths.len());
     /// ```
@@ -303,7 +305,7 @@ fn load_topology<'a>(py: Python, file_path: String) -> PyResult<&PyCell<Topology
 #[pyfunction]
 fn propagate_paths<'a>(topo: &Topology, asn: u32) -> PyResult<Vec<Vec<u32>>> {
     let mut all_paths = vec![];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::with_hasher(RANDOM_STATE.clone());
     topo.propagate_paths(&mut all_paths, asn, Direction::UP, vec![], &mut seen);
     Ok(all_paths)
 }
@@ -350,7 +352,7 @@ mod tests {
         assert_eq!(topo.ases_map.len(), 55809);
 
         let mut all_paths = vec![];
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::with_hasher(RANDOM_STATE.clone());
         topo.propagate_paths(&mut all_paths, 15169, Direction::UP, vec![], &mut seen);
         dbg!(all_paths.len());
     }
@@ -369,7 +371,7 @@ mod tests {
         assert_eq!(topo.ases_map.len(), 4);
 
         let mut all_paths = vec![];
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::with_hasher(RANDOM_STATE.clone());
         topo.propagate_paths(&mut all_paths, 1, Direction::UP, vec![], &mut seen);
 
         assert_eq!(all_paths.len(), 5);
@@ -378,5 +380,41 @@ mod tests {
         assert!(all_paths.contains(&vec![1,2,4]));
         assert!(all_paths.contains(&vec![1,3]));
         assert!(all_paths.contains(&vec![1,3,4]));
+    }
+
+    #[test]
+    fn propagate_dont_change() {
+        let mut topo = Topology::new();
+        let file = match File::open("20231201.as-rel.txt.bz2") {
+            Ok(f) => f,
+            Err(_) => panic!("cannot open file"),
+        };
+
+        let reader = BufReader::new(BzDecoder::new(&file));
+        let res = topo.build_topology(reader);
+        assert!(res.is_ok());
+
+        let mut all_paths = vec![];
+        let mut seen = HashSet::with_hasher(RANDOM_STATE.clone());
+        topo.propagate_paths(&mut all_paths, 15169, Direction::UP, vec![], &mut seen);
+
+        let first_len = all_paths.len();
+
+        let mut topo = Topology::new();
+        let file = match File::open("20231201.as-rel.txt.bz2") {
+            Ok(f) => f,
+            Err(_) => panic!("cannot open file"),
+        };
+        let reader = BufReader::new(BzDecoder::new(&file));
+        let res = topo.build_topology(reader);
+        assert!(res.is_ok());
+
+        let mut all_paths = vec![];
+        let mut seen = HashSet::with_hasher(RANDOM_STATE.clone());
+        topo.propagate_paths(&mut all_paths, 15169, Direction::UP, vec![], &mut seen);
+
+        let second_len = all_paths.len();
+
+        assert_eq!(first_len, second_len);
     }
 }
