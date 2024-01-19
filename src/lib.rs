@@ -31,6 +31,12 @@ pub struct Topology {
     pub graph: DiGraph<u32, RelType>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ValleyFreeTopology {
+    pub graph: DiGraph<u32, RelType>,
+    pub source: u32,
+}
+
 pub type TopologyPath = Vec<u32>;
 type TopologyPathIndex = Vec<NodeIndex>;
 
@@ -41,101 +47,39 @@ pub enum TopologyError {
     ParseError(String),
 }
 
-impl Topology {
-    pub fn from_edges(edges: Vec<(u32, u32, RelType)>) -> Self {
-        let mut graph = DiGraph::new();
+pub trait TopologyExt {
+    fn asn_of(&self, index: NodeIndex) -> u32;
+    fn index_of(&self, asn: u32) -> Option<NodeIndex>;
+    fn all_asns(&self) -> HashSet<u32>;
+    fn providers_of(&self, asn: u32) -> Option<HashSet<u32>>;
+    fn customers_of(&self, asn: u32) -> Option<HashSet<u32>>;
+    fn peers_of(&self, asn: u32) -> Option<HashSet<u32>>;
+}
 
-        let nodes: HashSet<u32> = edges
-            .iter()
-            .flat_map(|(asn1, asn2, _)| vec![*asn1, *asn2])
-            .collect();
+trait TopologyPathExt {
+    fn paths_graph(&self, asn: u32) -> DiGraph<u32, RelType>;
+}
 
-        let asn2index: HashMap<u32, NodeIndex> = nodes
-            .into_iter()
-            .map(|asn| (asn, graph.add_node(asn)))
-            .collect();
-
-        graph.extend_with_edges(edges.into_iter().map(|(asn1, asn2, rel)| {
-            (
-                *asn2index.get(&asn1).unwrap(),
-                *asn2index.get(&asn2).unwrap(),
-                rel,
-            )
-        }));
-
-        Topology { graph }
+impl TopologyExt for DiGraph<u32, RelType> {
+    fn asn_of(&self, index: NodeIndex) -> u32 {
+        *self.node_weight(index).unwrap()
     }
 
-    pub fn from_caida(reader: impl std::io::Read) -> Result<Self, TopologyError> {
-        let content = reader
-            .bytes()
-            .collect::<Result<Vec<u8>, _>>()
-            .map_err(TopologyError::IoError)?;
-
-        let content = String::from_utf8(content).map_err(|e| {
-            TopologyError::ParseError(format!("invalid UTF-8 in AS relationship file: {}", e))
-        })?;
-
-        let edges = content
-            .lines()
-            .filter(|line| !line.starts_with("#"))
-            .map(|line| {
-                let fields = line.split("|").collect::<Vec<&str>>();
-                let asn1 = fields[0]
-                    .parse::<u32>()
-                    .map_err(TopologyError::ParseAsnError)?;
-                let asn2 = fields[1]
-                    .parse::<u32>()
-                    .map_err(TopologyError::ParseAsnError)?;
-                let rel = fields[2]
-                    .parse::<i32>()
-                    .map_err(TopologyError::ParseAsnError)?;
-
-                match rel {
-                    // asn1 and asn2 are peers
-                    0 => Ok((asn1, asn2, RelType::PearToPear)),
-
-                    // asn1 is a provider of asn2
-                    -1 => Ok((asn1, asn2, RelType::ProviderToCustomer)),
-
-                    _ => Err(TopologyError::ParseError(format!(
-                        "unknown relationship type {} in {}",
-                        rel, line
-                    ))),
-                }
-            })
-            .collect::<Result<Vec<(u32, u32, RelType)>, _>>()?;
-
-        Ok(Topology::from_edges(edges))
+    fn index_of(&self, asn: u32) -> Option<NodeIndex> {
+        self.node_indices().find(|&index| self.asn_of(index) == asn)
     }
 
-    pub fn asn_of(&self, index: NodeIndex) -> u32 {
-        *self.graph.node_weight(index).unwrap()
+    fn all_asns(&self) -> HashSet<u32> {
+        self.raw_nodes().iter().map(|node| node.weight).collect()
     }
 
-    pub fn index_of(&self, asn: u32) -> Option<NodeIndex> {
-        self.graph
-            .node_indices()
-            .find(|&index| self.asn_of(index) == asn)
-    }
-
-    pub fn all_asns(&self) -> HashSet<u32> {
-        self.graph
-            .raw_nodes()
-            .iter()
-            .map(|node| node.weight)
-            .collect()
-    }
-
-    pub fn providers_of(&self, asn: u32) -> Option<HashSet<u32>> {
+    fn providers_of(&self, asn: u32) -> Option<HashSet<u32>> {
         let incoming = self
-            .graph
             .edges_directed(self.index_of(asn)?, petgraph::Direction::Incoming)
             .filter(|edge| edge.weight() == &RelType::ProviderToCustomer) // could be PearToPear
             .map(|edge| edge.source());
 
         let outgoing = self
-            .graph
             .edges_directed(self.index_of(asn)?, petgraph::Direction::Outgoing)
             .filter(|edge| edge.weight() == &RelType::CustomerToProvider)
             .map(|edge| edge.target());
@@ -148,15 +92,13 @@ impl Topology {
         )
     }
 
-    pub fn customers_of(&self, asn: u32) -> Option<HashSet<u32>> {
+    fn customers_of(&self, asn: u32) -> Option<HashSet<u32>> {
         let outgoing = self
-            .graph
             .edges_directed(self.index_of(asn)?, petgraph::Direction::Outgoing)
             .filter(|edge| edge.weight() == &RelType::ProviderToCustomer) // could be PearToPear
             .map(|edge| edge.target());
 
         let incoming = self
-            .graph
             .edges_directed(self.index_of(asn)?, petgraph::Direction::Incoming)
             .filter(|edge| edge.weight() == &RelType::CustomerToProvider)
             .map(|edge| edge.source());
@@ -169,15 +111,13 @@ impl Topology {
         )
     }
 
-    pub fn peers_of(&self, asn: u32) -> Option<HashSet<u32>> {
+    fn peers_of(&self, asn: u32) -> Option<HashSet<u32>> {
         let outgoing = self
-            .graph
             .edges_directed(self.index_of(asn)?, petgraph::Direction::Outgoing)
             .filter(|edge| edge.weight() == &RelType::PearToPear)
             .map(|edge| edge.target());
 
         let incoming = self
-            .graph
             .edges_directed(self.index_of(asn)?, petgraph::Direction::Incoming)
             .filter(|edge| edge.weight() == &RelType::PearToPear)
             .map(|edge| edge.source());
@@ -189,7 +129,9 @@ impl Topology {
                 .collect(),
         )
     }
+}
 
+impl TopologyPathExt for DiGraph<u32, RelType> {
     /*
      * Given the following topology:
      *
@@ -223,7 +165,7 @@ impl Topology {
      * You can use this graph to calculate the shortest path or even list all paths using the
      * petgraph library.
      */
-    pub fn paths_graph(&self, asn: u32) -> Topology {
+    fn paths_graph(&self, asn: u32) -> DiGraph<u32, RelType> {
         let mut graph = DiGraph::new();
 
         let node_map: HashMap<u32, NodeIndex> = self
@@ -303,11 +245,141 @@ impl Topology {
         }
 
         // assert!(!is_cyclic_directed(&graph));
+        graph
+    }
+}
+
+impl TopologyExt for Topology {
+    fn asn_of(&self, index: NodeIndex) -> u32 {
+        self.graph.asn_of(index)
+    }
+
+    fn index_of(&self, asn: u32) -> Option<NodeIndex> {
+        self.graph.index_of(asn)
+    }
+
+    fn all_asns(&self) -> HashSet<u32> {
+        self.graph.all_asns()
+    }
+
+    fn providers_of(&self, asn: u32) -> Option<HashSet<u32>> {
+        self.graph.providers_of(asn)
+    }
+
+    fn customers_of(&self, asn: u32) -> Option<HashSet<u32>> {
+        self.graph.customers_of(asn)
+    }
+
+    fn peers_of(&self, asn: u32) -> Option<HashSet<u32>> {
+        self.graph.peers_of(asn)
+    }
+}
+
+impl TopologyExt for ValleyFreeTopology {
+    fn asn_of(&self, index: NodeIndex) -> u32 {
+        self.graph.asn_of(index)
+    }
+
+    fn index_of(&self, asn: u32) -> Option<NodeIndex> {
+        self.graph.index_of(asn)
+    }
+
+    fn all_asns(&self) -> HashSet<u32> {
+        self.graph.all_asns()
+    }
+
+    fn providers_of(&self, asn: u32) -> Option<HashSet<u32>> {
+        self.graph.providers_of(asn)
+    }
+
+    fn customers_of(&self, asn: u32) -> Option<HashSet<u32>> {
+        self.graph.customers_of(asn)
+    }
+
+    fn peers_of(&self, asn: u32) -> Option<HashSet<u32>> {
+        self.graph.peers_of(asn)
+    }
+}
+
+impl Topology {
+    pub fn from_edges(edges: Vec<(u32, u32, RelType)>) -> Self {
+        let mut graph = DiGraph::new();
+
+        let nodes: HashSet<u32> = edges
+            .iter()
+            .flat_map(|(asn1, asn2, _)| vec![*asn1, *asn2])
+            .collect();
+
+        let asn2index: HashMap<u32, NodeIndex> = nodes
+            .into_iter()
+            .map(|asn| (asn, graph.add_node(asn)))
+            .collect();
+
+        graph.extend_with_edges(edges.into_iter().map(|(asn1, asn2, rel)| {
+            (
+                *asn2index.get(&asn1).unwrap(),
+                *asn2index.get(&asn2).unwrap(),
+                rel,
+            )
+        }));
+
         Topology { graph }
     }
 
-    pub fn shortest_path_to(&self, source: u32, target: u32) -> Option<TopologyPath> {
-        let source_index = self.index_of(source)?;
+    pub fn from_caida(reader: impl std::io::Read) -> Result<Self, TopologyError> {
+        let content = reader
+            .bytes()
+            .collect::<Result<Vec<u8>, _>>()
+            .map_err(TopologyError::IoError)?;
+
+        let content = String::from_utf8(content).map_err(|e| {
+            TopologyError::ParseError(format!("invalid UTF-8 in AS relationship file: {}", e))
+        })?;
+
+        let edges = content
+            .lines()
+            .filter(|line| !line.starts_with("#"))
+            .map(|line| {
+                let fields = line.split("|").collect::<Vec<&str>>();
+                let asn1 = fields[0]
+                    .parse::<u32>()
+                    .map_err(TopologyError::ParseAsnError)?;
+                let asn2 = fields[1]
+                    .parse::<u32>()
+                    .map_err(TopologyError::ParseAsnError)?;
+                let rel = fields[2]
+                    .parse::<i32>()
+                    .map_err(TopologyError::ParseAsnError)?;
+
+                match rel {
+                    // asn1 and asn2 are peers
+                    0 => Ok((asn1, asn2, RelType::PearToPear)),
+
+                    // asn1 is a provider of asn2
+                    -1 => Ok((asn1, asn2, RelType::ProviderToCustomer)),
+
+                    _ => Err(TopologyError::ParseError(format!(
+                        "unknown relationship type {} in {}",
+                        rel, line
+                    ))),
+                }
+            })
+            .collect::<Result<Vec<(u32, u32, RelType)>, _>>()?;
+
+        Ok(Topology::from_edges(edges))
+    }
+
+    pub fn valley_free_of(&self, asn: u32) -> ValleyFreeTopology {
+        ValleyFreeTopology {
+            graph: self.graph.paths_graph(asn),
+            source: asn,
+        }
+    }
+}
+
+impl ValleyFreeTopology {
+    pub fn shortest_path_to(&self, target: u32) -> Option<TopologyPath> {
+        let source_index = self.index_of(self.source)?;
         let target_index = self.index_of(target)?;
 
         // Use A* to find the shortest path between two nodes
@@ -330,12 +402,8 @@ impl Topology {
         Some(path)
     }
 
-    pub fn all_paths_to(
-        &self,
-        source: u32,
-        target: u32,
-    ) -> Option<impl Iterator<Item = TopologyPath> + '_> {
-        let source_index = self.index_of(source)?;
+    pub fn all_paths_to(&self, target: u32) -> Option<impl Iterator<Item = TopologyPath> + '_> {
+        let source_index = self.index_of(self.source)?;
         let target_index = self.index_of(target)?;
 
         let paths = all_simple_paths::<TopologyPathIndex, _>(
@@ -355,8 +423,8 @@ impl Topology {
         Some(paths)
     }
 
-    pub fn path_to_all_ases(&self, source: u32) -> Option<Vec<TopologyPath>> {
-        let source_index = self.index_of(source)?;
+    pub fn path_to_all_ases(&self) -> Option<Vec<TopologyPath>> {
+        let source_index = self.index_of(self.source)?;
 
         let mut stack: Vec<(NodeIndex, TopologyPathIndex)> =
             vec![(source_index, vec![source_index])];
@@ -533,7 +601,7 @@ mod test {
             (3, 6, RelType::ProviderToCustomer),
         ]);
 
-        let topo = topo.paths_graph(4);
+        let topo = topo.valley_free_of(4);
 
         let has_edge = |asn1: u32, asn2: u32| {
             topo.graph
@@ -559,18 +627,18 @@ mod test {
     #[test]
     fn test_shortest_path_to() {
         let topo = piramid_topology();
-        let topo = topo.paths_graph(4);
+        let topo = topo.valley_free_of(4);
 
-        let path = topo.shortest_path_to(4, 6).unwrap();
+        let path = topo.shortest_path_to(6).unwrap();
         assert_eq!(path, vec![4, 2, 1, 3, 6]);
     }
 
     #[test]
     fn test_all_paths_to() {
         let topo = piramid_topology();
-        let topo = topo.paths_graph(4);
+        let topo = topo.valley_free_of(4);
 
-        let paths = topo.all_paths_to(4, 5).unwrap().collect::<Vec<_>>();
+        let paths = topo.all_paths_to(5).unwrap().collect::<Vec<_>>();
 
         assert!(paths.contains(&[4, 2, 5].into()));
         assert!(paths.contains(&[4, 2, 1, 3, 5].into()));
@@ -580,9 +648,9 @@ mod test {
     #[test]
     fn test_path_to_all_ases() {
         let topo = piramid_topology();
-        let topo = topo.paths_graph(4);
+        let topo = topo.valley_free_of(4);
 
-        let paths = topo.path_to_all_ases(4).unwrap();
+        let paths = topo.path_to_all_ases().unwrap();
 
         assert!(paths.contains(&[4].into()));
         assert!(paths.contains(&[4, 2].into()));

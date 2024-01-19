@@ -9,10 +9,9 @@ fn main() {
         (3, 4, RelType::ProviderToCustomer),
     ]);
 
-    let start = 4;
-    let topo = topo.paths_graph(start);
+    let topo = topo.valley_free_of(4);
 
-    for path in topo.path_to_all_ases(start).unwrap() {
+    for path in topo.path_to_all_ases().unwrap() {
         println!("{:?}", path);
     }
 }
