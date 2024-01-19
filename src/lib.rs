@@ -7,6 +7,7 @@ use std::{
 };
 
 use petgraph::{
+    algo::{all_simple_paths, astar},
     graph::{DiGraph, NodeIndex},
     visit::EdgeRef,
 };
@@ -25,9 +26,13 @@ impl Default for RelType {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Topology {
     pub graph: DiGraph<u32, RelType>,
 }
+
+pub type TopologyPath = Vec<u32>;
+type TopologyPathIndex = Vec<NodeIndex>;
 
 #[derive(Debug)]
 pub enum TopologyError {
@@ -300,6 +305,92 @@ impl Topology {
         // assert!(!is_cyclic_directed(&graph));
         Topology { graph }
     }
+
+    pub fn shortest_path_to(&self, source: u32, target: u32) -> Option<TopologyPath> {
+        let source_index = self.index_of(source)?;
+        let target_index = self.index_of(target)?;
+
+        // Use A* to find the shortest path between two nodes
+        let (_len, path) = astar(
+            &self.graph,
+            source_index,
+            |finish| finish == target_index,
+            |edge| match edge.weight() {
+                // priorize pearing
+                RelType::PearToPear => 0,
+                RelType::ProviderToCustomer => 1,
+                RelType::CustomerToProvider => 2,
+            },
+            |_| 0,
+        )
+        .unwrap();
+
+        let path = path.iter().map(|node| self.asn_of(*node)).collect();
+
+        Some(path)
+    }
+
+    pub fn all_paths_to(
+        &self,
+        source: u32,
+        target: u32,
+    ) -> Option<impl Iterator<Item = TopologyPath> + '_> {
+        let source_index = self.index_of(source)?;
+        let target_index = self.index_of(target)?;
+
+        let paths = all_simple_paths::<TopologyPathIndex, _>(
+            &self.graph,
+            source_index,
+            target_index,
+            0,
+            None,
+        );
+
+        let paths = paths.map(move |path| {
+            path.iter()
+                .map(|node| self.asn_of(*node))
+                .collect::<Vec<u32>>()
+        });
+
+        Some(paths)
+    }
+
+    pub fn path_to_all_ases(&self, source: u32) -> Option<Vec<TopologyPath>> {
+        let source_index = self.index_of(source)?;
+
+        let mut stack: Vec<(NodeIndex, TopologyPathIndex)> =
+            vec![(source_index, vec![source_index])];
+        let mut visited: Vec<NodeIndex> = vec![];
+        let mut all_paths: Vec<TopologyPathIndex> = vec![];
+
+        while !stack.is_empty() {
+            let (node_idx, path) = stack.pop().unwrap();
+
+            if visited.contains(&node_idx) {
+                continue;
+            }
+
+            visited.push(node_idx);
+            all_paths.push(path.clone());
+
+            let childrens = self
+                .graph
+                .neighbors_directed(node_idx, petgraph::Direction::Outgoing)
+                .map(|child_idx| {
+                    let mut path = path.clone();
+                    path.push(child_idx);
+                    (child_idx, path)
+                });
+            stack.extend(childrens);
+        }
+
+        let all_paths = all_paths
+            .into_iter()
+            .map(|path| path.iter().map(|node| self.asn_of(*node)).collect())
+            .collect();
+
+        Some(all_paths)
+    }
 }
 
 #[cfg(test)]
@@ -328,6 +419,29 @@ mod test {
             (3, 2, RelType::PearToPear),
             (3, 4, RelType::ProviderToCustomer),
             (2, 4, RelType::ProviderToCustomer),
+        ])
+    }
+
+    /*               ┌─────┐
+     *               │  1  │
+     *               └──┬──┘
+     *           ┌──────┴─────┐
+     *        ┌──▼──┐      ┌──▼──┐
+     *        │  2  │      │  3  │
+     *        └──┬──┘      └──┬──┘
+     *     ┌─────┴────┐  ┌────┴────┐
+     *  ┌──▼──┐     ┌─▼──▼─┐    ┌──▼──┐
+     *  │  4  │     │  05  │    │  6  │
+     *  └─────┘     └──────┘    └─────┘
+     */
+    fn piramid_topology() -> Topology {
+        Topology::from_edges(vec![
+            (1, 2, RelType::ProviderToCustomer),
+            (1, 3, RelType::ProviderToCustomer),
+            (2, 4, RelType::ProviderToCustomer),
+            (2, 5, RelType::ProviderToCustomer),
+            (3, 5, RelType::ProviderToCustomer),
+            (3, 6, RelType::ProviderToCustomer),
         ])
     }
 
@@ -440,5 +554,42 @@ mod test {
 
         assert_eq!(topo.graph.edge_count(), 7);
         assert!(!is_cyclic_directed(&topo.graph));
+    }
+
+    #[test]
+    fn test_shortest_path_to() {
+        let topo = piramid_topology();
+        let topo = topo.paths_graph(4);
+
+        let path = topo.shortest_path_to(4, 6).unwrap();
+        assert_eq!(path, vec![4, 2, 1, 3, 6]);
+    }
+
+    #[test]
+    fn test_all_paths_to() {
+        let topo = piramid_topology();
+        let topo = topo.paths_graph(4);
+
+        let paths = topo.all_paths_to(4, 5).unwrap().collect::<Vec<_>>();
+
+        assert!(paths.contains(&[4, 2, 5].into()));
+        assert!(paths.contains(&[4, 2, 1, 3, 5].into()));
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn test_path_to_all_ases() {
+        let topo = piramid_topology();
+        let topo = topo.paths_graph(4);
+
+        let paths = topo.path_to_all_ases(4).unwrap();
+
+        assert!(paths.contains(&[4].into()));
+        assert!(paths.contains(&[4, 2].into()));
+        assert!(paths.contains(&[4, 2, 5].into()) || paths.contains(&[4, 2, 1, 3, 5].into()));
+        assert!(paths.contains(&[4, 2, 1].into()));
+        assert!(paths.contains(&[4, 2, 1, 3].into()));
+        assert!(paths.contains(&[4, 2, 1, 3, 6].into()));
+        assert_eq!(paths.len(), 6);
     }
 }
