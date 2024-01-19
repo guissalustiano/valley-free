@@ -461,6 +461,14 @@ impl ValleyFreeTopology {
     }
 }
 
+impl From<ValleyFreeTopology> for Topology {
+    fn from(valley_free: ValleyFreeTopology) -> Self {
+        Topology {
+            graph: valley_free.graph,
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use petgraph::algo::is_cyclic_directed;
