@@ -192,6 +192,7 @@ impl TopologyPathExt for DiGraph<u32, RelType> {
         let mut up_seen = Vec::new();
 
         // add first
+        graph.add_node(asn);
         up_path_queue.push(asn);
 
         while !up_path_queue.is_empty() {
